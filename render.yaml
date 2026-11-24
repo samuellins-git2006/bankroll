@@ -1,0 +1,10 @@
+# Blueprint do Render — configura o servidor automaticamente.
+# No dashboard: New → Blueprint → selecione este repositório → Apply.
+services:
+  - type: web
+    name: bankroll-server
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server/index.js
+    healthCheckPath: /health
