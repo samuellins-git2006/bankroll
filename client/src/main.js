@@ -1,25 +1,207 @@
 // ============================================================
-// CLIENTE HOTSEAT — controla setup, ações, UI e persistência.
+// CLIENTE — modos LOCAL (hotseat) e ONLINE (socket.io)
 // ============================================================
 
 import { CONFIG } from '../../shared/config.js';
 import {
   createGame, applyAction, legalActions, netWorth,
-  buildBlocker, sellValue, cur, groupIndices,
+  buildBlocker, sellValue, cur,
 } from '../../shared/engine.js';
 import { renderBoard, cellRect, hitIndex, SIZE } from './board.js';
+import { SERVER_URL } from './config.js';
 
 const $ = (s) => document.querySelector(s);
 const fmt = (n) => '$' + n.toLocaleString('pt-BR');
 const SAVE_KEY = 'bankroll_state_v1';
+const NAME_KEY = 'bankroll_name';
 
-let state = null;
-let busy = false; // bloqueia ações durante animações
+let mode = null;      // 'local' | 'online'
+let game = null;      // estado da engine
+let myId = null;      // 'p0'..'p3' (quem EU represento)
+let myToken = null;
+let room = null;      // último room:state recebido
+let busy = false;
+let auctionPrompted = null; // índice da propriedade já perguntada (leilão online)
+
+const me = () => (game && myId ? game.players.find((p) => p.id === myId) : null) ?? (game ? cur(game) : null);
 
 // ============================================================
-// SETUP
+// NAVEGAÇÃO ENTRE TELAS
+// ============================================================
+const SCREENS = ['mode-screen', 'setup-screen', 'lobby-screen', 'game-screen'];
+function showScreen(name) {
+  SCREENS.forEach((s) => $('#' + s).classList.toggle('hidden', s !== name));
+}
+
+// ============================================================
+// TOKEN + SOCKET
+// ============================================================
+function getToken() {
+  let t = sessionStorage.getItem('bankroll_token');
+  if (!t) {
+    t = 'tok-' + Math.random().toString(36).slice(2, 10);
+    sessionStorage.setItem('bankroll_token', t);
+  }
+  return t;
+}
+
+let sock = null;
+function ensureSocket() {
+  if (sock) return sock;
+  myToken = getToken();
+  sock = io(SERVER_URL, { auth: { token: myToken }, transports: ['websocket', 'polling'] });
+
+  sock.on('connect_error', (e) => toast('Falha ao conectar no servidor: ' + e.message, 'bad', 5000));
+  sock.on('room:error', ({ message }) => toast(message, 'bad'));
+
+  sock.on('room:joined', () => showScreen('lobby'));
+
+  sock.on('room:state', (r) => {
+    room = r;
+    if (!r.started && $('#game-screen').classList.contains('hidden') === false && game) {
+      // anfitrião voltou ao lobby
+      showScreen('lobby');
+      game = null;
+    }
+    if (!r.started) renderLobby();
+  });
+
+  sock.on('game:state', ({ state, events, seats }) => {
+    game = state;
+    busy = false;
+    const idx = (seats || []).findIndex((s) => s && s.token === myToken);
+    if (idx >= 0) myId = 'p' + idx;
+    showScreen('game');
+    render();
+    handleEvents(events || []);
+    onlineAuctionWatch();
+  });
+
+  return sock;
+}
+
+function emitAction(action) {
+  ensureSocket().emit('game:action', action);
+}
+
+// ============================================================
+// TELA DE MODO
+// ============================================================
+$('#input-name').value = localStorage.getItem(NAME_KEY) || '';
+
+function playerName() {
+  const n = $('#input-name').value.trim() || 'Jogador';
+  localStorage.setItem(NAME_KEY, n);
+  return n;
+}
+
+$('#btn-local').onclick = () => {
+  mode = 'local';
+  showScreen('setup');
+  if (localStorage.getItem(SAVE_KEY)) $('#btn-continue').classList.remove('hidden');
+};
+
+$('#btn-create').onclick = () => {
+  mode = 'online';
+  myToken = getToken();
+  ensureSocket().emit('room:create', { name: playerName() });
+};
+
+$('#btn-join').onclick = () => {
+  const code = $('#input-code').value.trim().toUpperCase();
+  if (code.length !== 4) return toast('Digite o código de 4 letras da sala.', 'bad');
+  mode = 'online';
+  myToken = getToken();
+  ensureSocket().emit('room:join', { code, name: playerName() });
+};
+
+// ============================================================
+// LOBBY (ONLINE)
+// ============================================================
+function renderLobby() {
+  if (!room) return;
+  $('#room-code').textContent = room.code;
+  $('#btn-copy').onclick = () => {
+    navigator.clipboard?.writeText(room.code).then(() => toast('Código copiado!', 'good'));
+  };
+
+  const isHost = room.hostToken === myToken;
+  $('#host-controls').classList.toggle('hidden', !isHost);
+  $('#waiting-host').classList.toggle('hidden', isHost);
+
+  // assentos
+  const seatsEl = $('#seat-list');
+  seatsEl.innerHTML = '';
+  for (let i = 0; i < room.playerCount; i++) {
+    const seat = room.seats[i];
+    const row = document.createElement('div');
+    row.className = 'seat-row' + (seat ? ' filled' : '');
+    if (!seat) {
+      row.innerHTML = `<span class="sname" style="color:var(--muted)">Vaga aberta${isHost ? ' (vira bot ao iniciar)' : ''}</span>`;
+    } else {
+      const tags = [
+        seat.isBot ? '<span class="tag">🤖 Bot</span>' : '',
+        seat.token === room.hostToken ? '<span class="tag host">👑 Anfitrião</span>' : '',
+        !seat.connected && !seat.isBot ? '<span class="tag off">desconectado</span>' : '',
+      ].join('');
+      row.innerHTML = `
+        <span class="sname">${seat.name}</span>${tags}
+        ${isHost && seat.isBot ? '<button class="rm" title="Remover bot">✖</button>' : ''}`;
+      const rm = row.querySelector('.rm');
+      if (rm) rm.onclick = () => ensureSocket().emit('room:removeSeat', { index: i });
+    }
+    seatsEl.appendChild(row);
+  }
+
+  if (!isHost) return;
+
+  // controles do anfitrião
+  buildSegmented(
+    $('#count-options'), [2, 3, 4], ['2', '3', '4'],
+    room.playerCount,
+    (v) => ensureSocket().emit('room:config', { ...room.config, playerCount: v })
+  );
+  buildSegmented(
+    $('#goal-options-l'), [3000, 5000, 7000], ['3 mil', '5 mil', '7 mil'],
+    room.config.goal,
+    (v) => ensureSocket().emit('room:config', { ...room.config, goal: v })
+  );
+  buildSegmented(
+    $('#round-options-l'), [30, 50, 0], ['30', '50', 'Ilimitado'],
+    room.config.maxRounds,
+    (v) => ensureSocket().emit('room:config', { ...room.config, maxRounds: v })
+  );
+
+  $('#btn-addbot').onclick = () => ensureSocket().emit('room:addBot');
+  $('#btn-start-online').onclick = () => ensureSocket().emit('room:start');
+}
+
+$('#btn-leave').onclick = () => {
+  ensureSocket().emit('room:leave');
+  sock?.disconnect();
+  room = null; game = null; myId = null; sock = null;
+  showScreen('mode');
+};
+
+// helper compartilhado com o setup local
+function buildSegmented(container, options, labels, selected, onPick) {
+  container.innerHTML = '';
+  options.forEach((opt, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = labels[i];
+    if (opt === selected) b.classList.add('active');
+    b.onclick = () => onPick(opt);
+    container.appendChild(b);
+  });
+}
+
+// ============================================================
+// SETUP (LOCAL / HOTSEAT)
 // ============================================================
 let setupCount = 4;
+let setupGoal = CONFIG.goalOptions[0];
+let setupRounds = CONFIG.roundOptions[0];
 
 function initSetup() {
   const nameList = $('#name-list');
@@ -44,25 +226,6 @@ function initSetup() {
   });
 }
 
-function buildSegmented(container, options, labels, selected, onPick) {
-  container.innerHTML = '';
-  options.forEach((opt, i) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = labels[i];
-    if (opt === selected) b.classList.add('active');
-    b.onclick = () => {
-      container.querySelectorAll('button').forEach((x) => x.classList.remove('active'));
-      b.classList.add('active');
-      onPick(opt);
-    };
-    container.appendChild(b);
-  });
-}
-
-let setupGoal = CONFIG.goalOptions[0];
-let setupRounds = CONFIG.roundOptions[0];
-
 buildSegmented(
   $('#goal-options'), CONFIG.goalOptions,
   CONFIG.goalOptions.map((g) => fmt(g)), setupGoal,
@@ -78,56 +241,65 @@ $('#form-setup').onsubmit = (e) => {
   e.preventDefault();
   const names = [...document.querySelectorAll('#name-list input')].map((el) => el.value);
   const defs = names.slice(0, setupCount).map((n) => ({ name: n }));
-  state = createGame({ goal: setupGoal, maxRounds: setupRounds }, defs);
+  game = createGame({ goal: setupGoal, maxRounds: setupRounds }, defs);
+  mode = 'local';
+  myId = cur(game).id;
   save();
-  showGame();
+  showScreen('game');
+  render();
 };
 
 $('#btn-continue').onclick = () => {
   const raw = localStorage.getItem(SAVE_KEY);
   if (!raw) return;
   try {
-    state = JSON.parse(raw).state;
-    showGame();
+    game = JSON.parse(raw).state;
+    mode = 'local';
+    showScreen('game');
+    render();
   } catch { localStorage.removeItem(SAVE_KEY); }
 };
 
 $('#btn-new').onclick = () => {
+  if (mode === 'online') {
+    ensureSocket().emit('room:leave');
+    sock?.disconnect();
+    room = null; game = null; myId = null; sock = null;
+    showScreen('mode');
+    return;
+  }
   if (!confirm('Encerrar a partida atual e voltar ao menu?')) return;
   localStorage.removeItem(SAVE_KEY);
-  state = null;
-  $('#game-screen').classList.add('hidden');
-  $('#setup-screen').classList.remove('hidden');
-  $('#modal-root').classList.add('hidden');
+  game = null;
+  showScreen('mode');
 };
 
-// restaurar partida?
-if (localStorage.getItem(SAVE_KEY)) {
-  $('#btn-continue').classList.remove('hidden');
-}
-
-function showGame() {
-  $('#setup-screen').classList.add('hidden');
-  $('#game-screen').classList.remove('hidden');
-  render();
-}
-
 function save() {
-  localStorage.setItem(SAVE_KEY, JSON.stringify({ v: 1, state }));
+  if (mode === 'local' && game) {
+    localStorage.setItem(SAVE_KEY, JSON.stringify({ v: 1, state: game }));
+  }
 }
 
 // ============================================================
 // AÇÕES
 // ============================================================
 async function act(action, pid = null) {
-  if (!state || busy) return;
-  const playerId = pid ?? cur(state).id;
-  const res = applyAction(state, playerId, action);
+  if (!game || busy) return;
+
+  if (mode === 'online') {
+    emitAction(action);
+    return;
+  }
+
+  // ----- hotseat -----
+  const playerId = pid ?? cur(game).id;
+  const res = applyAction(game, playerId, action);
   if (!res.ok) {
     toast(res.error, 'bad');
     return;
   }
-  state = res.state;
+  game = res.state;
+  myId = cur(game).id;
   save();
   await handleEvents(res.events);
   render();
@@ -136,13 +308,13 @@ async function act(action, pid = null) {
 
 // animação do dado antes de rolar de verdade
 function rollDice() {
-  if (!state || busy) return;
+  if (!game || busy) return;
   busy = true;
   const fx = $('#dice-fx');
   const canvas = $('#board');
   const rect = canvas.getBoundingClientRect();
   const scale = rect.width / SIZE;
-  const target = cellRect(cur(state).position);
+  const target = cellRect(cur(game).position);
   fx.classList.remove('hidden');
   fx.style.left = rect.left + (target.x + target.w / 2) * scale - 37 + 'px';
   fx.style.top = rect.top + (target.y + target.h / 2) * scale - 37 + 'px';
@@ -160,20 +332,18 @@ function rollDice() {
 }
 
 // ============================================================
-// FLUXOS AUTOMÁTICOS (leilão)
+// FLUXOS AUTOMÁTICOS — HOTSEAT (leilão guiado)
 // ============================================================
 let auctionRunning = false;
 
 function checkAutoFlows() {
-  if (!state || state.over) return;
-  const pending = state.pending;
+  if (!game || game.over || mode !== 'local') return;
+  const pending = game.pending;
   if (pending?.type === 'auction' && pending.space !== null) {
     runAuctionFlow();
   }
 }
 
-// Sequência em hotseat: cada outro jogador oferece (ou passa),
-// depois o ofertante aceita uma troca ou cancela.
 async function runAuctionFlow() {
   if (auctionRunning) return;
   auctionRunning = true;
@@ -185,23 +355,20 @@ async function runAuctionFlow() {
 }
 
 async function runAuctionFlowInner() {
-  const offerer = cur(state);
-  const others = state.players.filter(
-    (p) => !p.bankrupt && p.id !== offerer.id
-  );
+  const offerer = cur(game);
+  const others = game.players.filter((p) => !p.bankrupt && p.id !== offerer.id);
 
   for (const o of others) {
-    if (state.pending?.offers.some((x) => x.playerId === o.id)) continue;
+    if (game.pending?.offers.some((x) => x.playerId === o.id)) continue;
     const choice = await modalPledge(o);
-    if (!state.pending || state.pending.space === null) return; // cancelado
+    if (!game.pending || game.pending.space === null) return;
     if (choice !== null) {
       await act({ type: 'pledge', space: choice }, o.id);
     }
-    if (!state.pending) return;
+    if (!game.pending) return;
   }
 
-  // ofertante decide
-  const pending = state.pending;
+  const pending = game.pending;
   if (!pending || !pending.offers.length) {
     modalInfo(
       'Nenhuma oferta',
@@ -219,6 +386,38 @@ async function runAuctionFlowInner() {
 }
 
 // ============================================================
+// FLUXO DE LEILÃO — ONLINE (modal por cliente)
+// ============================================================
+function onlineAuctionWatch() {
+  if (mode !== 'online' || !game || game.over) return;
+  const pend = game.pending;
+
+  if (pend?.type === 'auction' && pend.space !== null) {
+    const idx = Number(myId.slice(1));
+    const meP = game.players[idx];
+    if (!meP || meP.id === cur(game).id) return; // ofertante usa os botões do painel
+    if (pend.offers.some((o) => o.playerId === meP.id)) return;
+    if (auctionPrompted === pend.space) return;
+
+    const owned = Object.keys(game.props)
+      .filter((i) => game.props[i].owner === meP.id)
+      .map(Number);
+    if (!owned.length) return;
+
+    auctionPrompted = pend.space;
+    modalPledge(meP).then((choice) => {
+      const p = game?.pending;
+      if (choice !== null && p?.space === pend.space &&
+          !p.offers.some((o) => o.playerId === meP.id)) {
+        emitAction({ type: 'pledge', space: choice });
+      }
+    });
+  } else if (!pend) {
+    auctionPrompted = null;
+  }
+}
+
+// ============================================================
 // EVENTOS → TOASTS / MODAIS
 // ============================================================
 function handleEvents(events) {
@@ -230,8 +429,8 @@ function handleEvents(events) {
     });
   }
   const win = events.find((e) => e.type === 'win');
-  if (win && state.winner) {
-    const p = state.players.find((x) => x.id === state.winner);
+  if (win && game?.winner) {
+    const p = game.players.find((x) => x.id === game.winner);
     toast(`🏆 ${p.name} venceu a partida!`, 'good', 6000);
   }
   return Promise.resolve();
@@ -241,8 +440,8 @@ function handleEvents(events) {
 // RENDER
 // ============================================================
 function render() {
-  if (!state) return;
-  renderBoard($('#board'), state);
+  if (!game) return;
+  renderBoard($('#board'), game);
   renderPlayers();
   renderTurnBanner();
   renderActions();
@@ -251,30 +450,31 @@ function render() {
 
 function renderTurnBanner() {
   const el = $('#turn-banner');
-  if (state.over) {
-    const w = state.players.find((p) => p.id === state.winner);
+  if (game.over) {
+    const w = game.players.find((p) => p.id === game.winner);
     el.textContent = `🏆 ${w.name} venceu!`;
     el.style.color = 'var(--accent)';
     return;
   }
-  const cp = cur(state);
-  el.textContent = `Vez de: ${cp.name}`;
+  const cp = cur(game);
+  const you = myId === cp.id ? ' (você)' : '';
+  el.textContent = `Vez de: ${cp.name}${you}`;
   el.style.color = cp.color;
 }
 
 function renderPlayers() {
   const el = $('#players');
   el.innerHTML = '';
-  state.players.forEach((p, i) => {
-    const nw = netWorth(state, p.id);
+  game.players.forEach((p) => {
+    const nw = netWorth(game, p.id);
     const row = document.createElement('div');
     row.className =
       'player-row' +
-      (p.id === cur(state).id && !state.over ? ' current' : '') +
+      (p.id === cur(game).id && !game.over ? ' current' : '') +
       (p.bankrupt ? ' bankrupt' : '');
     row.innerHTML = `
       <span class="dot" style="background:${p.color}"></span>
-      <span class="pname">${p.name}${p.jailTurns > 0 ? ' 🔒' : ''}</span>
+      <span class="pname">${p.name}${p.jailTurns > 0 ? ' 🔒' : ''}${p.id === myId ? ' ★' : ''}</span>
       <span class="pcash">${fmt(p.cash)}</span>
       <span class="pworth">${fmt(nw)}</span>`;
     el.appendChild(row);
@@ -284,56 +484,64 @@ function renderPlayers() {
 function renderActions() {
   const el = $('#actions');
   el.innerHTML = '';
-  if (state.over) {
-    const b = mkBtn('🔄 Jogar novamente', () => {
-      localStorage.removeItem(SAVE_KEY);
-      location.reload();
-    }, 'btn primary');
-    el.appendChild(b);
+  const meP = me();
+  if (!meP) return;
+
+  if (game.over) {
+    if (mode === 'online' && room?.hostToken === myToken) {
+      el.appendChild(mkBtn('🔄 Voltar ao lobby', () => ensureSocket().emit('room:reset'), 'btn primary'));
+    } else if (mode === 'local') {
+      el.appendChild(mkBtn('🔄 Jogar novamente', () => {
+        localStorage.removeItem(SAVE_KEY);
+        location.reload();
+      }, 'btn primary'));
+    } else {
+      const p = document.createElement('p');
+      p.className = 'note';
+      p.textContent = 'Aguardando o anfitrião…';
+      el.appendChild(p);
+    }
     return;
   }
-  const cp = cur(state);
-  const list = legalActions(state, cp.id);
+
+  const list = legalActions(game, meP.id);
   for (const a of list) {
     const action = { ...a };
     delete action.label;
     const isRoll = action.type === 'roll';
 
-    // oferecer propriedade abre um seletor em vez de falhar
     if (action.type === 'offerAuction') {
-      const owned = Object.keys(state.props)
-        .filter((i) => state.props[i].owner === cp.id)
+      const owned = Object.keys(game.props)
+        .filter((i) => game.props[i].owner === meP.id)
         .map(Number);
-      if (!owned.length) continue; // sem propriedades: só resta "não leiloar"
-      const b = mkBtn(a.label, () => modalPickOwned(owned, cp), 'btn');
-      el.appendChild(b);
+      if (!owned.length) continue;
+      el.appendChild(mkBtn(a.label, () => modalPickOwned(owned, meP), 'btn'));
       continue;
     }
 
-    const b = mkBtn(a.label, isRoll ? rollDice : () => act(action, cp.id), isRoll ? 'btn primary' : 'btn');
+    const b = mkBtn(a.label, isRoll ? rollDice : () => act(action, meP.id), isRoll ? 'btn primary' : 'btn');
     if (action.type === 'buy') b.classList.add('primary');
     el.appendChild(b);
   }
 
   // construir / vender (painel)
-  const owned = Object.keys(state.props)
-    .filter((i) => state.props[i].owner === cp.id)
+  const isMyTurn = !game.over && myId === cur(game).id;
+  const owned = Object.keys(game.props)
+    .filter((i) => game.props[i].owner === meP.id)
     .map(Number);
-  if (owned.length && !state.pending && !state.jailAction) {
+  if (owned.length && isMyTurn && !game.pending && !game.jailAction) {
     const bBuild = mkBtn('🏠 Construir', () => modalManage('build'));
-    const canAnyBuild = owned.some((i) => !buildBlocker(state, cp.id, i));
-    bBuild.disabled = !canAnyBuild;
+    bBuild.disabled = !owned.some((i) => !buildBlocker(game, meP.id, i));
     el.appendChild(bBuild);
 
-    const bSell = mkBtn('💸 Vender', () => modalManage('sell'));
-    el.appendChild(bSell);
+    el.appendChild(mkBtn('💸 Vender', () => modalManage('sell')));
   }
 }
 
 function renderLog() {
   const el = $('#log');
   el.innerHTML = '';
-  for (const line of state.log.slice(-60)) {
+  for (const line of game.log.slice(-60)) {
     const d = document.createElement('div');
     d.className = 'entry' + (line.startsWith('—') || line.startsWith('🏆') ? ' highlight' : '');
     d.textContent = line;
@@ -352,7 +560,7 @@ function mkBtn(label, onclick, cls = 'btn') {
 
 // clique no tabuleiro → ficha da propriedade
 $('#board').addEventListener('click', (e) => {
-  if (!state || busy) return;
+  if (!game || busy) return;
   const rect = e.target.getBoundingClientRect();
   const scale = rect.width / SIZE;
   const idx = hitIndex((e.clientX - rect.left) / scale, (e.clientY - rect.top) / scale);
@@ -374,20 +582,20 @@ function closeModal() {
   $('#modal-root').classList.add('hidden');
   $('#modal-root').innerHTML = '';
 }
+window.__closeModal = closeModal;
 
 // --- Ficha da propriedade ---
 function modalProperty(idx) {
-  const sp = state.cfg.board[idx];
-  const cp = cur(state);
-  const own = state.props[idx];
+  const sp = game.cfg.board[idx];
+  const meP = me();
+  const own = game.props[idx];
 
-  if (sp.type === 'lucky' || sp.type === 'start' || sp.type === 'jail' || sp.type === 'auction') {
+  if (['lucky', 'start', 'jail', 'auction'].includes(sp.type)) {
     openModal(`
       <h2>${nameOf(sp)}</h2>
       <div class="sub">${spDesc(sp)}</div>
-      <div class="m-actions">${'<button class="btn btn-secondary" onclick="window.__closeModal()">Fechar</button>'}</div>
+      <div class="m-actions"><button class="btn btn-secondary" onclick="window.__closeModal()">Fechar</button></div>
     `);
-    window.__closeModal = closeModal;
     return;
   }
 
@@ -400,50 +608,49 @@ function modalProperty(idx) {
       <tr><td>Com 1 construção</td><td>${fmt(base * 3)}</td></tr>
       <tr><td>Com 2 construções</td><td>${fmt(base * 6)}</td></tr>
       <tr><td>Com 3 construções</td><td>${fmt(base * 12)}</td></tr>
-      <tr><td>Custo da construção</td><td>${fmt(state.cfg.buildingCostByGroup[sp.group])}</td></tr>`;
+      <tr><td>Custo da construção</td><td>${fmt(game.cfg.buildingCostByGroup[sp.group])}</td></tr>`;
   } else {
     rows = `
-      <tr><td>Aluguel (1 pública)</td><td>${fmt(state.cfg.publicRentBase)}</td></tr>
-      <tr><td>Aluguel (2 públicas)</td><td>${fmt(state.cfg.publicRentBase * 2)}</td></tr>
-      <tr><td>Aluguel (3 públicas)</td><td>${fmt(state.cfg.publicRentBase * 3)}</td></tr>
-      <tr><td>Aluguel (4 públicas)</td><td>${fmt(state.cfg.publicRentBase * 4)}</td></tr>`;
+      <tr><td>Aluguel (1 pública)</td><td>${fmt(game.cfg.publicRentBase)}</td></tr>
+      <tr><td>Aluguel (2 públicas)</td><td>${fmt(game.cfg.publicRentBase * 2)}</td></tr>
+      <tr><td>Aluguel (3 públicas)</td><td>${fmt(game.cfg.publicRentBase * 3)}</td></tr>
+      <tr><td>Aluguel (4 públicas)</td><td>${fmt(game.cfg.publicRentBase * 4)}</td></tr>`;
   }
 
-  const ownerName = own ? state.players.find((p) => p.id === own.owner).name : null;
+  const ownerName = own ? game.players.find((p) => p.id === own.owner).name : null;
+  const isMyTurn = myId === cur(game).id && !game.over;
 
-  // botões contextuais
   const buttons = [];
-  if (state.pending?.type === 'buy' && state.pending.space === idx && !state.over) {
+  if (game.pending?.type === 'buy' && game.pending.space === idx && isMyTurn) {
     buttons.push(`<button class="btn btn-primary" data-act="buy">Comprar por ${fmt(sp.price)}</button>`);
     buttons.push(`<button class="btn btn-secondary" data-act="decline">Não comprar</button>`);
   }
-  if (own && own.owner === cp.id && !state.pending && !state.over) {
-    const blocker = sp.type === 'city' ? buildBlocker(state, cp.id, idx) : 'n/a';
+  if (own && own.owner === meP.id && isMyTurn && !game.pending) {
+    const blocker = sp.type === 'city' ? buildBlocker(game, meP.id, idx) : 'n/a';
     if (sp.type === 'city')
       buttons.push(
         blocker
           ? `<button class="btn" disabled>🏠 Construir (${blocker})</button>`
-          : `<button class="btn btn-primary" data-act="build">🏠 Construir por ${fmt(state.cfg.buildingCostByGroup[sp.group])}</button>`
+          : `<button class="btn btn-primary" data-act="build">🏠 Construir por ${fmt(game.cfg.buildingCostByGroup[sp.group])}</button>`
       );
-    buttons.push(`<button class="btn btn-secondary" data-act="sell">💸 Vender por ${fmt(sellValue(state, cp.id, idx))}</button>`);
+    buttons.push(`<button class="btn btn-secondary" data-act="sell">💸 Vender por ${fmt(sellValue(game, meP.id, idx))}</button>`);
   }
   buttons.push(`<button class="btn btn-secondary" data-act="close">Fechar</button>`);
 
   const m = openModal(`
-    ${sp.type === 'city' ? `<div class="group-band" style="background:${state.cfg.groups[sp.group].color}"></div>` : ''}
+    ${sp.type === 'city' ? `<div class="group-band" style="background:${game.cfg.groups[sp.group].color}"></div>` : ''}
     <h2>${sp.name}</h2>
     <div class="sub">${spDesc(sp)}${ownerName ? ` • Dono: <b>${ownerName}</b>${own.buildings ? ` • ${own.buildings} construção(ões)` : ''}` : ' • Sem dono'}</div>
     <table>${rows}</table>
     <div class="m-actions">${buttons.join('')}</div>
   `);
 
-  window.__closeModal = closeModal;
   m.querySelectorAll('[data-act]').forEach((b) => {
     b.onclick = async () => {
-      const act2 = b.dataset.act;
-      if (act2 === 'close') return closeModal();
+      const a = b.dataset.act;
+      if (a === 'close') return closeModal();
       closeModal();
-      await act({ type: act2, space: idx });
+      await act({ type: a, space: idx });
     };
   });
 }
@@ -476,33 +683,33 @@ function modalLucky(card, onOk) {
 }
 
 // --- Construir / vender ---
-function modalManage(mode) {
-  const cp = cur(state);
-  const owned = Object.keys(state.props)
-    .filter((i) => state.props[i].owner === cp.id)
+function modalManage(mode2) {
+  const meP = me();
+  const owned = Object.keys(game.props)
+    .filter((i) => game.props[i].owner === meP.id)
     .map(Number);
   const items = owned.map((idx) => {
-    const sp = state.cfg.board[idx];
-    const own = state.props[idx];
+    const sp = game.cfg.board[idx];
+    const own = game.props[idx];
     let label = sp.name;
     let disabled = false;
     let hint = '';
-    if (mode === 'build') {
-      const blocker = sp.type === 'city' ? buildBlocker(state, cp.id, idx) : 'n/a';
+    if (mode2 === 'build') {
+      const blocker = sp.type === 'city' ? buildBlocker(game, meP.id, idx) : 'n/a';
       disabled = !!blocker;
       hint = sp.type === 'city'
         ? (blocker || `Construções: ${own.buildings}/3`)
         : 'Só cidades';
     } else {
-      hint = `Recebe ${fmt(sellValue(state, cp.id, idx))}`;
+      hint = `Recebe ${fmt(sellValue(game, meP.id, idx))}`;
       label = sp.name + (own.buildings ? ` (${own.buildings}🏗)` : '');
     }
     return { idx, label, hint, disabled };
   });
 
   const m = openModal(`
-    <h2>${mode === 'build' ? '🏠 Construir' : '💸 Vender'}</h2>
-    <div class="sub">${mode === 'build'
+    <h2>${mode2 === 'build' ? '🏠 Construir' : '💸 Vender'}</h2>
+    <div class="sub">${mode2 === 'build'
       ? 'Construções exigem o monopólio da cor (máx. 3 por cidade).'
       : 'A venda devolve 80% do valor investido.'}</div>
     <div class="prop-grid">
@@ -513,16 +720,15 @@ function modalManage(mode) {
     </div>
     <div class="m-actions"><button class="btn btn-secondary" onclick="window.__closeModal()">Fechar</button></div>
   `);
-  window.__closeModal = closeModal;
   m.querySelectorAll('.prop-btn:not([disabled])').forEach((b) => {
     b.onclick = async () => {
       closeModal();
-      await act({ type: mode, space: Number(b.dataset.idx) });
+      await act({ type: mode2, space: Number(b.dataset.idx) });
     };
   });
 }
 
-// --- Escolher propriedade própria (para oferecer no leilão) ---
+// --- Escolher propriedade própria (oferecer no leilão) ---
 function modalPickOwned(owned, player) {
   const m = openModal(`
     <h2>Leilão — ${player.name}</h2>
@@ -530,8 +736,8 @@ function modalPickOwned(owned, player) {
       Se fechar uma troca, ambos ganham $100.</div>
     <div class="prop-grid">
       ${owned.map((idx) => {
-        const sp = state.cfg.board[idx];
-        const own = state.props[idx];
+        const sp = game.cfg.board[idx];
+        const own = game.props[idx];
         return `<button class="prop-btn" data-idx="${idx}">
           ${sp.name}<small>${own.buildings ? own.buildings + '🏗 • ' : ''}${fmt(sp.price)}</small>
         </button>`;
@@ -539,7 +745,6 @@ function modalPickOwned(owned, player) {
     </div>
     <div class="m-actions"><button class="btn btn-secondary" onclick="window.__closeModal()">Cancelar</button></div>
   `);
-  window.__closeModal = closeModal;
   m.querySelectorAll('.prop-btn').forEach((b) => {
     b.onclick = async () => {
       closeModal();
@@ -548,11 +753,11 @@ function modalPickOwned(owned, player) {
   });
 }
 
-// --- Leilão: outro jogador oferece ---
+// --- Leilão: escolher propriedade para oferecer em troca ---
 function modalPledge(player) {
   return new Promise((resolve) => {
-    const owned = Object.keys(state.props)
-      .filter((i) => state.props[i].owner === player.id)
+    const owned = Object.keys(game.props)
+      .filter((i) => game.props[i].owner === player.id)
       .map(Number);
 
     if (!owned.length) {
@@ -567,8 +772,8 @@ function modalPledge(player) {
         (ou passe). Quem fechar a troca ganha $100 de bônus.</div>
       <div class="prop-grid">
         ${owned.map((idx) => {
-          const sp = state.cfg.board[idx];
-          const own = state.props[idx];
+          const sp = game.cfg.board[idx];
+          const own = game.props[idx];
           return `<button class="prop-btn" data-idx="${idx}">
             ${sp.name}<small>${own.buildings ? own.buildings + '🏗 • ' : ''}${fmt(sp.price)}</small>
           </button>`;
@@ -584,14 +789,14 @@ function modalPledge(player) {
   });
 }
 
-// --- Leilão: ofertante aceita ou cancela ---
+// --- Leilão: ofertante aceita ou cancela (hotseat) ---
 function modalOffers(pending, onAccept, onCancel) {
-  const offerer = cur(state);
-  const spMine = state.cfg.board[pending.space];
+  const offerer = cur(game);
+  const spMine = game.cfg.board[pending.space];
   const rows = pending.offers.map((o) => {
-    const p = state.players.find((x) => x.id === o.playerId);
-    const sp = state.cfg.board[o.space];
-    const own = state.props[o.space];
+    const p = game.players.find((x) => x.id === o.playerId);
+    const sp = game.cfg.board[o.space];
+    const own = game.props[o.space];
     return `
       <div class="offer-row">
         <span><b style="color:${p.color}">${p.name}</b> oferece <b>${sp.name}</b>${own.buildings ? ` (${own.buildings}🏗)` : ''}</span>
@@ -637,3 +842,4 @@ function toast(msg, cls = '', ms = 2600) {
 // INICIALIZAÇÃO
 // ============================================================
 initSetup();
+showScreen('mode-screen');

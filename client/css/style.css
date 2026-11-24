@@ -67,6 +67,49 @@ body {
 }
 #name-list input:focus { outline: none; border-color: var(--accent); }
 
+/* ============ Modo / Lobby ============ */
+.join-row { display: flex; gap: 8px; margin-top: 12px; }
+.join-row .btn { flex-shrink: 0; }
+.code-input {
+  flex: 1; padding: 12px; border-radius: 10px; text-align: center;
+  background: var(--panel-2); border: 1px solid var(--border);
+  color: var(--text); font-size: 18px; font-weight: 800;
+  letter-spacing: 6px; text-transform: uppercase; font-family: inherit;
+}
+.code-input:focus { outline: none; border-color: var(--accent); }
+.logo.small { font-size: 30px; margin-bottom: 14px; }
+.room-code-box {
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  margin: 4px 0 6px;
+}
+.room-code {
+  font-size: 38px; font-weight: 900; letter-spacing: 10px;
+  color: var(--accent); font-variant-numeric: tabular-nums;
+  padding-left: 10px;
+}
+#seat-list { display: grid; gap: 7px; margin: 16px 0; }
+.seat-row {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--panel-2); border: 1px dashed var(--border);
+  border-radius: 10px; padding: 10px 12px; font-size: 14px;
+  min-height: 42px;
+}
+.seat-row.filled { border-style: solid; }
+.seat-row .sname { flex: 1; font-weight: 600; }
+.seat-row .tag {
+  font-size: 11px; padding: 3px 8px; border-radius: 8px;
+  background: var(--panel); border: 1px solid var(--border); color: var(--muted);
+}
+.seat-row .tag.host { color: var(--accent); border-color: var(--accent); }
+.seat-row .tag.off { color: var(--red); border-color: var(--red); }
+.seat-row .rm {
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 15px; font-family: inherit;
+}
+.seat-row .rm:hover { color: var(--red); }
+#host-controls { display: grid; gap: 10px; margin-bottom: 10px; }
+#btn-leave { width: 100%; }
+
 /* ============ Botões ============ */
 .btn {
   border: none; border-radius: 12px; cursor: pointer;

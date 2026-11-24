@@ -5,11 +5,67 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Bankroll — Jogo de Tabuleiro</title>
   <link rel="stylesheet" href="./css/style.css" />
+  <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
 </head>
 <body>
 
-  <!-- ==================== TELA DE CONFIGURAÇÃO ==================== -->
-  <section id="setup-screen">
+  <!-- ==================== ESCOLHA DE MODO ==================== -->
+  <section id="mode-screen">
+    <div class="setup-card">
+      <h1 class="logo">BANK<span>ROLL</span></h1>
+      <p class="tagline">Compre, construa, negocie — seja o primeiro a atingir a meta de patrimônio!</p>
+
+      <div class="field">
+        <label>Seu nome</label>
+        <input id="input-name" type="text" maxlength="14" placeholder="Seu nome" autocomplete="off" />
+      </div>
+
+      <button id="btn-local" class="btn btn-secondary btn-lg">📱 Jogar local (mesma tela)</button>
+      <button id="btn-create" class="btn btn-primary btn-lg">🌐 Criar sala online</button>
+
+      <div class="join-row">
+        <input id="input-code" class="code-input" maxlength="4" placeholder="CÓDIGO" autocomplete="off" />
+        <button id="btn-join" class="btn btn-secondary">Entrar na sala</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== LOBBY (ONLINE) ==================== -->
+  <section id="lobby-screen" class="hidden">
+    <div class="setup-card">
+      <h1 class="logo small">BANK<span>ROLL</span></h1>
+      <div class="room-code-box">
+        <span id="room-code" class="room-code">----</span>
+        <button id="btn-copy" class="btn btn-secondary btn-sm">📋 Copiar</button>
+      </div>
+      <p class="tagline">Compartilhe o código com seus amigos!</p>
+
+      <div id="seat-list"></div>
+
+      <div id="host-controls">
+        <div class="field">
+          <label>Vagas</label>
+          <div id="count-options" class="segmented"></div>
+        </div>
+        <div class="field">
+          <label>Meta de patrimônio</label>
+          <div id="goal-options-l" class="segmented"></div>
+        </div>
+        <div class="field">
+          <label>Rodadas máximas</label>
+          <div id="round-options-l" class="segmented"></div>
+        </div>
+        <button id="btn-addbot" class="btn btn-secondary">🤖 Adicionar bot</button>
+        <button id="btn-start-online" class="btn btn-primary btn-lg">▶ Iniciar partida</button>
+      </div>
+      <p id="waiting-host" class="tagline hidden">Aguardando o anfitrião iniciar a partida…</p>
+
+      <button id="btn-leave" class="btn btn-danger btn-sm">✖ Sair da sala</button>
+    </div>
+  </section>
+
+  <!-- ==================== TELA DE CONFIGURAÇÃO (LOCAL) ==================== -->
+  <section id="setup-screen" class="hidden">
     <div class="setup-card">
       <h1 class="logo">BANK<span>ROLL</span></h1>
       <p class="tagline">Compre, construa, negocie — seja o primeiro a atingir a meta de patrimônio!</p>
@@ -62,7 +118,7 @@
         <h3>Registro</h3>
         <div id="log"></div>
       </div>
-      <button id="btn-new" class="btn btn-danger btn-sm">✖ Nova partida</button>
+      <button id="btn-new" class="btn btn-danger btn-sm">✖ Sair da partida</button>
     </aside>
   </section>
 
