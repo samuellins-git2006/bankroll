@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bankroll — Jogo de Tabuleiro</title>
+  <link rel="stylesheet" href="./css/style.css" />
+</head>
+<body>
+
+  <!-- ==================== TELA DE CONFIGURAÇÃO ==================== -->
+  <section id="setup-screen">
+    <div class="setup-card">
+      <h1 class="logo">BANK<span>ROLL</span></h1>
+      <p class="tagline">Compre, construa, negocie — seja o primeiro a atingir a meta de patrimônio!</p>
+
+      <button id="btn-continue" class="btn btn-secondary hidden">▶ Continuar partida anterior</button>
+
+      <form id="form-setup">
+        <div class="field">
+          <label>Número de jogadores</label>
+          <div id="player-count" class="segmented">
+            <button type="button" data-count="2">2</button>
+            <button type="button" data-count="3">3</button>
+            <button type="button" data-count="4" class="active">4</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Jogadores</label>
+          <div id="name-list"></div>
+        </div>
+
+        <div class="field">
+          <label>Meta de patrimônio</label>
+          <div id="goal-options" class="segmented"></div>
+        </div>
+
+        <div class="field">
+          <label>Rodadas máximas</label>
+          <div id="round-options" class="segmented"></div>
+        </div>
+
+        <button type="submit" class="btn btn-primary btn-lg">🎲 Iniciar partida</button>
+      </form>
+
+      <footer class="setup-foot">Jogo local (hotseat) — todos jogam neste aparelho.</footer>
+    </div>
+  </section>
+
+  <!-- ==================== TELA DO JOGO ==================== -->
+  <section id="game-screen" class="hidden">
+    <div id="board-wrap">
+      <canvas id="board"></canvas>
+    </div>
+
+    <aside id="side">
+      <div id="turn-banner"></div>
+      <div id="players"></div>
+      <div id="actions"></div>
+      <div id="log-wrap">
+        <h3>Registro</h3>
+        <div id="log"></div>
+      </div>
+      <button id="btn-new" class="btn btn-danger btn-sm">✖ Nova partida</button>
+    </aside>
+  </section>
+
+  <!-- ==================== SOBREPOSIÇÕES ==================== -->
+  <div id="modal-root" class="hidden"></div>
+  <div id="toast-root"></div>
+  <div id="dice-fx" class="hidden"></div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

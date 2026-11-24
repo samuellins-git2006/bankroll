@@ -1,0 +1,10 @@
+{
+  "name": "bankroll",
+  "version": "0.1.0",
+  "description": "Clone do Bankroll (Plato) — jogo de tabuleiro imobiliário",
+  "type": "module",
+  "scripts": {
+    "dev": "node tools/serve.cjs",
+    "test": "node tests/smoke.js"
+  }
+}
